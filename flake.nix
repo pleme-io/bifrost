@@ -33,7 +33,7 @@
     inherit packages;
 
     homeManagerModules.default = import ./module {
-      hmHelpers = substrate.lib.hmServiceHelpers;
+      hmHelpers = import "${substrate}/lib/hm-service-helpers.nix" { lib = nixpkgs.lib; };
       inherit packages;
     };
 
