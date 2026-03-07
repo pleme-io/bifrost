@@ -1,11 +1,12 @@
 # Bifrost — split-horizon DNS daemon for LAN/Tailscale networks
 #
 # Home-manager module that:
-#   1. Generates bifrost config from blackmatter.networkTopology
+#   1. Generates bifrost config from its own nodes/services options
 #   2. Runs bifrost as a launchd agent (macOS) or systemd service (NixOS)
 #   3. Writes dnsmasq overrides based on LAN reachability
 #
-# Requires: blackmatter.networkTopology with tailscaleIpv4 on nodes
+# Topology data is set by the consumer (e.g., via a shared defaults module
+# that reads from blackmatter.networkTopology at the system level).
 #
 { hmHelpers, packages }:
 {
@@ -21,15 +22,12 @@ with lib; let
 
   inherit (hmHelpers) mkLaunchdService mkSystemdService;
 
-  # Build the config file from network topology
-  topoCfg = config.blackmatter.networkTopology;
-
-  # Generate node entries: only nodes that have both lanIpv4 and tailscaleIpv4
+  # Generate node entries: only nodes with tailscaleIpv4 and domains
   nodeLines = concatStringsSep "\n" (mapAttrsToList (name: node:
-    if node ? tailscaleIpv4 && node.tailscaleIpv4 != null && node.domains != []
+    if node.tailscaleIpv4 != null && node.domains != []
     then "node ${node.ipv4} ${node.tailscaleIpv4} ${concatStringsSep " " node.domains}"
     else "# ${name}: no tailscale IP, skipped"
-  ) topoCfg.nodes);
+  ) cfg.nodes);
 
   # Generate service entries: services always resolve to their LAN IP
   # (reachable via Tailscale subnet routing when remote)
@@ -37,7 +35,7 @@ with lib; let
     if svc.domains != []
     then "service ${svc.ipv4} ${concatStringsSep " " svc.domains}"
     else "# ${name}: no domains, skipped"
-  ) topoCfg.services);
+  ) cfg.services);
 
   # dnsmasq signal command differs by platform
   defaultSignalCmd = if isDarwin
@@ -66,6 +64,41 @@ with lib; let
   logDir = if isDarwin
     then "${config.home.homeDirectory}/Library/Logs"
     else "${config.home.homeDirectory}/.local/share/bifrost/logs";
+
+  # Submodule type for nodes
+  nodeSubmodule = types.submodule {
+    options = {
+      ipv4 = mkOption {
+        type = types.str;
+        description = "LAN IPv4 address of the node";
+      };
+      tailscaleIpv4 = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Tailscale IPv4 address (fallback when LAN unreachable)";
+      };
+      domains = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Domain names for this node";
+      };
+    };
+  };
+
+  # Submodule type for services
+  serviceSubmodule = types.submodule {
+    options = {
+      ipv4 = mkOption {
+        type = types.str;
+        description = "IPv4 address of the service";
+      };
+      domains = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Domain names for this service";
+      };
+    };
+  };
 in {
   options.services.bifrost = {
     enable = mkEnableOption "Bifrost split-horizon DNS daemon";
@@ -105,6 +138,24 @@ in {
       type = types.str;
       default = defaultSignalCmd;
       description = "Command to reload dnsmasq after config update";
+    };
+
+    nodes = mkOption {
+      type = types.attrsOf nodeSubmodule;
+      default = {};
+      description = ''
+        Network nodes with LAN and optional Tailscale IPs.
+        Bifrost switches between LAN and Tailscale IPs based on gateway reachability.
+      '';
+    };
+
+    services = mkOption {
+      type = types.attrsOf serviceSubmodule;
+      default = {};
+      description = ''
+        Infrastructure services with LAN IPs.
+        Always resolve to their LAN IP (reachable via Tailscale subnet routing when remote).
+      '';
     };
   };
 

@@ -37,6 +37,10 @@
       inherit packages;
     };
 
+    # System-level bridge: reads blackmatter.networkTopology → sets HM bifrost options
+    nixosModules.default = import ./module/system-bridge.nix;
+    darwinModules.default = import ./module/system-bridge.nix;
+
     devShells = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
     in {
