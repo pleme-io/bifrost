@@ -1,0 +1,11 @@
+[package]
+name = "bifrost"
+version = "0.1.0"
+edition = "2021"
+description = "Split-horizon DNS daemon — LAN-first with Tailscale fallback"
+license = "MIT"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
