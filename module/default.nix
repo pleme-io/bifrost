@@ -7,7 +7,7 @@
 #
 # Requires: blackmatter.networkTopology with tailscaleIpv4 on nodes
 #
-{ hmHelpers }:
+{ hmHelpers, packages }:
 {
   config,
   lib,
@@ -17,6 +17,7 @@
 with lib; let
   cfg = config.services.bifrost;
   isDarwin = pkgs.stdenv.isDarwin;
+  system = pkgs.stdenv.hostPlatform.system;
 
   inherit (hmHelpers) mkLaunchdService mkSystemdService;
 
@@ -44,9 +45,7 @@ with lib; let
     else "systemctl reload dnsmasq";
 
   # dnsmasq config output path
-  defaultConfPath = if isDarwin
-    then "/etc/dnsmasq.d/bifrost.conf"
-    else "/etc/dnsmasq.d/bifrost.conf";
+  defaultConfPath = "/etc/dnsmasq.d/bifrost.conf";
 
   # Generated config file
   bifrostConfig = pkgs.writeText "bifrost.conf" ''
@@ -73,6 +72,8 @@ in {
 
     package = mkOption {
       type = types.package;
+      default = packages.${system}.default;
+      defaultText = literalExpression "bifrost.packages.\${system}.default";
       description = "Bifrost package";
     };
 

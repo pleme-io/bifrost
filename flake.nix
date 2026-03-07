@@ -18,7 +18,7 @@
     forAllSystems = nixpkgs.lib.genAttrs [
       "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"
     ];
-  in {
+
     packages = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
     in {
@@ -29,9 +29,12 @@
         cargoLock.lockFile = ./Cargo.lock;
       };
     });
+  in {
+    inherit packages;
 
     homeManagerModules.default = import ./module {
       hmHelpers = substrate.lib.hmServiceHelpers;
+      inherit packages;
     };
 
     devShells = forAllSystems (system: let
