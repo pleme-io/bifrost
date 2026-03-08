@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "bifrost"
+name = "toride"
 version = "0.1.0"

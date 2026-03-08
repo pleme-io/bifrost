@@ -1,5 +1,5 @@
 {
-  description = "Bifrost — split-horizon DNS daemon for LAN/Tailscale networks";
+  description = "Toride — split-horizon DNS daemon for LAN/Tailscale networks";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -23,7 +23,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
     in {
       default = pkgs.rustPlatform.buildRustPackage {
-        pname = "bifrost";
+        pname = "toride";
         version = "0.1.0";
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
@@ -37,7 +37,7 @@
       inherit packages;
     };
 
-    # System-level bridge: reads blackmatter.networkTopology → sets HM bifrost options
+    # System-level bridge: reads blackmatter.networkTopology → sets HM toride options
     nixosModules.default = import ./module/system-bridge.nix;
     darwinModules.default = import ./module/system-bridge.nix;
 
