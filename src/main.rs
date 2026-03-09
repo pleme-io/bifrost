@@ -13,6 +13,8 @@
 //   probe-timeout <milliseconds>        — ping timeout (default: 1000)
 //   dnsmasq-conf <path>                 — output file for dnsmasq overrides
 //   dnsmasq-signal <command>            — command to reload dnsmasq
+//   fail-threshold <count>             — consecutive failures before switching (default: 3)
+//   heartbeat-interval <cycles>        — probe cycles between heartbeat logs (default: 30)
 //   node <lan_ip> <ts_ip> <domain>...   — node with LAN + Tailscale IPs
 //   service <lan_ip> <domain>...        — service (LAN-only, routed via Tailscale subnet)
 
@@ -57,6 +59,12 @@ fn main() {
                 println!("  {} → {ip} ({})", node.domains.join(", "),
                     if on_lan { "lan" } else { "tailscale" });
             }
+            if !config.services.is_empty() {
+                println!("services:");
+                for svc in &config.services {
+                    println!("  {} → {} (lan-only, subnet-routed)", svc.domains.join(", "), svc.ip);
+                }
+            }
         }
         _ => {
             eprintln!("toride — split-horizon DNS for LAN/Tailscale networks");
@@ -77,18 +85,52 @@ fn run_daemon(config_path: &str) {
     eprintln!("toride: {} nodes, {} services", config.nodes.len(), config.services.len());
     eprintln!("toride: output → {}", config.dnsmasq_conf.display());
 
+    // Validate the reload command binary exists before entering the loop.
+    // Catches the exact class of bug that broke the ping-based probe.
+    validate_reload_command(&config.dnsmasq_signal);
+
+    eprintln!("toride: fail-threshold={}, heartbeat-interval={} cycles",
+        config.fail_threshold, config.heartbeat_interval);
+
     let mut last_on_lan: Option<bool> = None;
+    let mut fail_streak: u32 = 0;
+    let mut cycle: u64 = 0;
 
     loop {
         let on_lan = probe_gateway(&config.gateway, config.probe_timeout);
 
-        // Only update dnsmasq when state changes (or on first run)
-        if last_on_lan != Some(on_lan) {
-            let mode = if on_lan { "lan" } else { "tailscale" };
+        // Debounce: track consecutive failures
+        if on_lan {
+            fail_streak = 0;
+        } else {
+            fail_streak = fail_streak.saturating_add(1);
+        }
+
+        // Determine effective state: stay on LAN until fail_streak hits threshold.
+        // Switch TO LAN is immediate — LAN is always the preferred state.
+        let effective_on_lan = if on_lan {
+            true
+        } else {
+            fail_streak < config.fail_threshold
+        };
+
+        // Only update dnsmasq when effective state changes (or on first run)
+        if last_on_lan != Some(effective_on_lan) {
+            let mode = if effective_on_lan { "lan" } else { "tailscale" };
             eprintln!("toride: switching to {mode} mode");
-            write_dnsmasq_conf(&config, on_lan);
+            write_dnsmasq_conf(&config, effective_on_lan);
             reload_dnsmasq(&config.dnsmasq_signal);
-            last_on_lan = Some(on_lan);
+            last_on_lan = Some(effective_on_lan);
+        }
+
+        // Periodic heartbeat so the daemon is visible in journalctl
+        cycle = cycle.wrapping_add(1);
+        if cycle % config.heartbeat_interval == 0 {
+            let mode = if effective_on_lan { "lan" } else { "tailscale" };
+            eprintln!("toride: heartbeat — {mode} mode (gateway {} {}, streak={})",
+                config.gateway,
+                if on_lan { "reachable" } else { "unreachable" },
+                fail_streak);
         }
 
         std::thread::sleep(config.probe_interval);
@@ -115,17 +157,24 @@ fn probe_gateway(gateway: &str, timeout: Duration) -> bool {
     // Pure Rust probe — no dependency on `ping` binary.
     // Try TCP connect to common gateway ports (53/DNS, 80/HTTP, 443/HTTPS).
     // Routers almost always respond on at least one of these.
+    //
+    // Timeout is split across ports so worst case = 1x configured timeout,
+    // not 3x. `.any()` short-circuits on first success.
     let addr: IpAddr = match gateway.parse() {
         Ok(a) => a,
-        Err(_) => return false,
+        Err(_) => {
+            eprintln!("toride: gateway '{gateway}' is not a valid IP address");
+            return false;
+        }
     };
 
     let ports = [53, 80, 443];
+    let per_port_timeout = timeout / (ports.len() as u32);
     let reachable = ports.iter().any(|&port| {
         use std::net::TcpStream;
         TcpStream::connect_timeout(
             &std::net::SocketAddr::new(addr, port),
-            timeout,
+            per_port_timeout,
         )
         .is_ok()
     });
@@ -133,6 +182,8 @@ fn probe_gateway(gateway: &str, timeout: Duration) -> bool {
     let elapsed = start.elapsed();
     if reachable {
         eprintln!("toride: gateway {gateway} responded in {}ms", elapsed.as_millis());
+    } else {
+        eprintln!("toride: gateway {gateway} unreachable ({}ms)", elapsed.as_millis());
     }
 
     reachable
@@ -176,6 +227,30 @@ fn write_dnsmasq_conf(config: &Config, on_lan: bool) {
     }
 }
 
+/// Validate the reload command binary exists at startup.
+/// This catches PATH issues (like the ping bug) before the daemon runs for hours.
+fn validate_reload_command(signal_cmd: &str) {
+    let parts: Vec<&str> = signal_cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        eprintln!("toride: warning: dnsmasq-signal is empty, dnsmasq won't be reloaded");
+        return;
+    }
+    let binary = parts[0];
+    // Check if binary is an absolute path (Nix store path)
+    if binary.starts_with('/') {
+        if !std::path::Path::new(binary).exists() {
+            eprintln!("toride: ERROR: reload binary not found: {binary}");
+            eprintln!("toride: dnsmasq-signal = {signal_cmd}");
+            eprintln!("toride: hint: use full Nix store path in dnsmasq-signal config");
+            std::process::exit(1);
+        }
+    } else {
+        // Relative binary name — warn that this is fragile in NixOS systemd services
+        eprintln!("toride: warning: dnsmasq-signal uses relative binary '{binary}'");
+        eprintln!("toride: this may fail in NixOS systemd — use full path instead");
+    }
+}
+
 fn reload_dnsmasq(signal_cmd: &str) {
     let parts: Vec<&str> = signal_cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -204,6 +279,8 @@ struct Config {
     gateway: String,
     probe_interval: Duration,
     probe_timeout: Duration,
+    fail_threshold: u32,
+    heartbeat_interval: u64,
     dnsmasq_conf: PathBuf,
     dnsmasq_signal: String,
     nodes: Vec<Node>,
@@ -231,6 +308,8 @@ fn load_config(path: &str) -> Config {
         gateway: "192.168.50.1".to_string(),
         probe_interval: Duration::from_secs(10),
         probe_timeout: Duration::from_millis(1000),
+        fail_threshold: 3,
+        heartbeat_interval: 30,
         dnsmasq_conf: PathBuf::from("/etc/dnsmasq.d/toride.conf"),
         dnsmasq_signal: "killall -HUP dnsmasq".to_string(),
         nodes: Vec::new(),
@@ -260,6 +339,26 @@ fn load_config(path: &str) -> Config {
             }
             "dnsmasq-conf" => config.dnsmasq_conf = PathBuf::from(parts[1]),
             "dnsmasq-signal" => config.dnsmasq_signal = parts[1..].join(" "),
+            "fail-threshold" => {
+                if let Ok(n) = parts[1].parse::<u32>() {
+                    if n == 0 {
+                        eprintln!("toride: warning: fail-threshold must be >= 1, using 1");
+                        config.fail_threshold = 1;
+                    } else {
+                        config.fail_threshold = n;
+                    }
+                }
+            }
+            "heartbeat-interval" => {
+                if let Ok(n) = parts[1].parse::<u64>() {
+                    if n == 0 {
+                        eprintln!("toride: warning: heartbeat-interval must be >= 1, using 1");
+                        config.heartbeat_interval = 1;
+                    } else {
+                        config.heartbeat_interval = n;
+                    }
+                }
+            }
             "node" if parts.len() >= 4 => {
                 config.nodes.push(Node {
                     lan_ip: parts[1].to_string(),
@@ -276,6 +375,35 @@ fn load_config(path: &str) -> Config {
             _ => {
                 eprintln!("toride: unknown config directive: {}", parts[0]);
             }
+        }
+    }
+
+    // Validate gateway IP at load time — fail fast rather than silently returning false
+    if config.gateway.parse::<IpAddr>().is_err() {
+        eprintln!("toride: error: gateway '{}' is not a valid IP address", config.gateway);
+        std::process::exit(1);
+    }
+
+    // Validate node IPs
+    for node in &config.nodes {
+        if node.lan_ip.parse::<IpAddr>().is_err() {
+            eprintln!("toride: error: node LAN IP '{}' is invalid (domains: {})",
+                node.lan_ip, node.domains.join(", "));
+            std::process::exit(1);
+        }
+        if node.ts_ip.parse::<IpAddr>().is_err() {
+            eprintln!("toride: error: node Tailscale IP '{}' is invalid (domains: {})",
+                node.ts_ip, node.domains.join(", "));
+            std::process::exit(1);
+        }
+    }
+
+    // Validate service IPs
+    for svc in &config.services {
+        if svc.ip.parse::<IpAddr>().is_err() {
+            eprintln!("toride: error: service IP '{}' is invalid (domains: {})",
+                svc.ip, svc.domains.join(", "));
+            std::process::exit(1);
         }
     }
 
