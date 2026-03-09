@@ -18,7 +18,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::net::{IpAddr, UdpSocket};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -112,35 +112,25 @@ fn run_once(config_path: &str, verbose: bool) {
 fn probe_gateway(gateway: &str, timeout: Duration) -> bool {
     let start = Instant::now();
 
-    // Strategy 1: UDP connect (fastest, no privileges needed)
-    // A UDP "connect" doesn't send packets — it just checks if the route exists
-    // in the kernel routing table. If the LAN interface is up and has a route
-    // to the gateway, this succeeds instantly.
-    if let Ok(addr) = gateway.parse::<IpAddr>() {
-        if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
-            let _ = sock.set_read_timeout(Some(timeout));
-            if sock.connect((addr, 53)).is_ok() {
-                // Route exists. Now do a real reachability check with ping.
-                // UDP connect alone doesn't prove the gateway is actually there.
-            }
-        }
-    }
-
-    // Strategy 2: Shell out to ping (reliable, cross-platform)
-    let timeout_secs = timeout.as_secs().max(1);
-    let result = if cfg!(target_os = "macos") {
-        Command::new("ping")
-            .args(["-c", "1", "-W", &(timeout_secs * 1000).to_string(), gateway])
-            .output()
-    } else {
-        Command::new("ping")
-            .args(["-c", "1", "-W", &timeout_secs.to_string(), gateway])
-            .output()
+    // Pure Rust probe — no dependency on `ping` binary.
+    // Try TCP connect to common gateway ports (53/DNS, 80/HTTP, 443/HTTPS).
+    // Routers almost always respond on at least one of these.
+    let addr: IpAddr = match gateway.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
     };
 
-    let reachable = result.map(|o| o.status.success()).unwrap_or(false);
-    let elapsed = start.elapsed();
+    let ports = [53, 80, 443];
+    let reachable = ports.iter().any(|&port| {
+        use std::net::TcpStream;
+        TcpStream::connect_timeout(
+            &std::net::SocketAddr::new(addr, port),
+            timeout,
+        )
+        .is_ok()
+    });
 
+    let elapsed = start.elapsed();
     if reachable {
         eprintln!("toride: gateway {gateway} responded in {}ms", elapsed.as_millis());
     }
