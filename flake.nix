@@ -26,7 +26,7 @@
         pname = "toride";
         version = "0.1.0";
         src = ./.;
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoHash = "sha256-gbV1NY04pkNNkIxW/o1WW6ndvmIsOVcUC4UmJMmK29k=";
       };
     });
   in {
