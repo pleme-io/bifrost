@@ -3,55 +3,32 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    crate2nix.url = "github:nix-community/crate2nix";
+    flake-utils.url = "github:numtide/flake-utils";
     substrate = {
       url = "github:pleme-io/substrate";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    devenv = {
-      url = "github:cachix/devenv";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, substrate, devenv }:
-  let
-    forAllSystems = nixpkgs.lib.genAttrs [
-      "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"
-    ];
-
-    packages = forAllSystems (system: let
-      pkgs = nixpkgs.legacyPackages.${system};
-    in {
-      default = pkgs.rustPlatform.buildRustPackage {
-        pname = "toride";
-        version = "0.1.0";
-        src = ./.;
-        cargoHash = "sha256-gbV1NY04pkNNkIxW/o1WW6ndvmIsOVcUC4UmJMmK29k=";
+  outputs = { self, nixpkgs, crate2nix, flake-utils, substrate }:
+    let
+      flakeOutputs = (import "${substrate}/lib/rust-tool-release-flake.nix" {
+        inherit nixpkgs crate2nix flake-utils;
+      }) {
+        toolName = "toride";
+        src = self;
+        repo = "pleme-io/bifrost";
       };
-    });
-  in {
-    inherit packages;
+    in
+    flakeOutputs // {
+      homeManagerModules.default = import ./module {
+        hmHelpers = import "${substrate}/lib/hm-service-helpers.nix" { lib = nixpkgs.lib; };
+        packages = flakeOutputs.packages;
+      };
 
-    homeManagerModules.default = import ./module {
-      hmHelpers = import "${substrate}/lib/hm-service-helpers.nix" { lib = nixpkgs.lib; };
-      inherit packages;
+      # System-level bridge: reads blackmatter.networkTopology → sets HM toride options
+      nixosModules.default = import ./module/system-bridge.nix;
+      darwinModules.default = import ./module/system-bridge.nix;
     };
-
-    # System-level bridge: reads blackmatter.networkTopology → sets HM toride options
-    nixosModules.default = import ./module/system-bridge.nix;
-    darwinModules.default = import ./module/system-bridge.nix;
-
-    devShells = forAllSystems (system: let
-      pkgs = nixpkgs.legacyPackages.${system};
-    in {
-      default = devenv.lib.mkShell {
-        inputs = { inherit nixpkgs devenv; };
-        inherit pkgs;
-        modules = [{
-          languages.rust.enable = true;
-          packages = with pkgs; [ nixpkgs-fmt ];
-        }];
-      };
-    });
-  };
 }
